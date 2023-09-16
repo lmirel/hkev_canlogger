@@ -52,7 +52,7 @@ void err_printf(const char *fmt, ...)
     vfprintf(stderr, fmt, args);
     va_end(args);
 }
-#define ERROR(x) do { out_printf x; } while (0)
+#define ERROR(x) do { err_printf x; } while (0)
 
 #define debug_print(fmt, ...) \
         do { if (DEBUG) fprintf(stderr, "%s:%d:%s(): " fmt, __FILE__, \
@@ -107,6 +107,9 @@ int open_canserial(char *_dashport, int spd)
 		_dashportfd = -1;
 		//_dashport = NULL;
 	}
+	char lb[3];
+	while(read(_dashportfd, lb, 1) == 1) 
+		printf("\npipe cleaning serial port");
 	PRINT(("connected to serial device '%s', on %d", tbuf, _dashportfd));
 	return _dashportfd;
 }
@@ -198,7 +201,7 @@ int process_can_frame(char *msg, int s)
 	//current timestamp
 	long cts = (int)strtol(msg + 2, NULL, 10);
 	//sleep only for file handling
-	if (opt_infn && lts > 0)
+	if (1 && (opt_infn && lts > 0))
 	{
 		//printf("#sleep for %ldms (cts %ld)\n", (cts - lts), cts);
 		usleep((cts - lts) * 1000);
@@ -257,18 +260,20 @@ int main(int argc, char *argv[])
 	}
 	infd = opt_infn?open_canfile(opt_infn):open_canserial(opt_insd, B115200);
 	struct pollfd fds[2];
-	int timeout_msecs = 500;
+	int timeout_msecs = 5000;
 	int ret;
 	int i;
 	char msg[120];
 	int msgr = 0;
-	while (1)
+	int _go_on = 1;
+	while (_go_on && infd != -1)
 	{
 		/* poll */
 		memset ((void*)fds, 0, sizeof(fds));
 		fds[0].fd = infd;
 		fds[0].events = POLLIN;
 		ret = poll(fds, 1, timeout_msecs);
+		TRACE(("poll ret %d, evt 0x%X vs 0x%X", ret, fds[0].revents, fds[0].events));
 		if (ret > 0)
 		{
 			/* An event on one of the fds has occurred. */
@@ -280,28 +285,61 @@ int main(int argc, char *argv[])
 					while (msgr < 120)
 					{
 						if (read(fds[i].fd, msg+msgr, 1) == 1)
-							msgr++;
-						if (msg[msgr-1] == '\r' || msg[msgr-1] == '\n')
 						{
-							msg[msgr-1] = 0;
-							msgr = 0;
-							TRACE(("read line: <%s>", msg));
-							//only process CAN messages starting with '<'out or '>'in
-							if (*msg == '<' || *msg == '>')
+							//TRACE(("read char: %02X", msg[msgr]));
+							msgr++;
+							if ((msg[msgr-1] == '\r' || msg[msgr-1] == '\n'))
 							{
-								process_can_frame(msg, s);
+								msg[msgr-1] = 0;
+								msgr = 0;
+								TRACE(("read line: <%s>", msg));
+								//only process CAN messages starting with '<'out or '>'in
+								if (*msg == '<' || *msg == '>')
+								{
+									process_can_frame(msg, s);
+								}
 							}
 						}
+						else
+						{
+							if (opt_infn)
+							{
+								//file reading failure means EOF
+								TRACE(("finished processing data"));
+								_go_on = 0;
+								break;
+							}
+							else
+								break;
+						}
+
 					}
+					TRACE(("read %dB", msgr));
 				}
-				if (fds[i].revents & POLLHUP)
+				if (fds[i].revents != POLLIN) 
 				{
-					/* A hangup has occurred on device number i. */
+					printf("\n#D:fd=%d; events 0x%X: %s%s%s\n", fds[i].fd, fds[i].revents,
+						(fds[i].revents & POLLIN)  ? "POLLIN "  : "",
+						(fds[i].revents & POLLHUP) ? "POLLHUP " : "",
+						(fds[i].revents & POLLERR) ? "POLLERR " : "");
+					_go_on = 0;
 					break;
 				}
 			} //for all
 		} //if poll event
+		if (ret == 0)
+		{
+			TRACE(("TIMEOUT"));
+			_go_on = 0;
+		}
+		if (ret < 0)
+		{
+			TRACE(("finished processing data"));
+			_go_on = 0;
+		}
 	} //while 1
+	TRACE(("cleaning up.."));
 	close(infd);
+	TRACE(("done.\n"));
 	return 0;
 }
